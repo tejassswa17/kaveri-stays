@@ -16,3 +16,6 @@ frontend/dist/
 
 .vscode/
 .idea/
+
+backups/
+*.dump

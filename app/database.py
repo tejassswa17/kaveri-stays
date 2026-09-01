@@ -15,14 +15,27 @@ _connection_pool: pool.ThreadedConnectionPool | None = None
 def get_pool() -> pool.ThreadedConnectionPool:
     global _connection_pool
     if _connection_pool is None or _connection_pool.closed:
-        _connection_pool = pool.ThreadedConnectionPool(
-            minconn=POOL_MIN,
-            maxconn=POOL_MAX,
-            host=os.environ["DATABASE_HOST"],
-            database=os.environ["DATABASE_NAME"],
-            user=os.environ["DATABASE_USER"],
-            password=os.environ["DATABASE_PASSWORD"],
-        )
+        database_url = os.environ.get("DATABASE_URL")
+        if database_url:
+            if database_url.startswith("postgres://"):
+                database_url = database_url.replace("postgres://", "postgresql://", 1)
+            _connection_pool = pool.ThreadedConnectionPool(
+                minconn=POOL_MIN,
+                maxconn=POOL_MAX,
+                dsn=database_url,
+                options="-c search_path=public,extensions",
+            )
+        else:
+            _connection_pool = pool.ThreadedConnectionPool(
+                minconn=POOL_MIN,
+                maxconn=POOL_MAX,
+                host=os.environ.get("DATABASE_HOST", "localhost"),
+                port=int(os.environ.get("DATABASE_PORT", "5432")),
+                database=os.environ.get("DATABASE_NAME", "kaveri"),
+                user=os.environ.get("DATABASE_USER", "postgres"),
+                password=os.environ.get("DATABASE_PASSWORD", ""),
+                options="-c search_path=public,extensions",
+            )
     return _connection_pool
 
 
