@@ -1,0 +1,66 @@
+$kind: http-request
+description: ""
+url: "{{baseUrl}}/bookings/:booking_id/review"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+pathVariables:
+  - key: booking_id
+    value: "7720"
+    disabled: false
+    description: ""
+    $type: |-
+      {
+        "type": "object",
+        "properties": {
+          "value": {
+            "title": "Booking Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+body:
+  type: json
+  content: |-
+    {
+      "rating": 3,
+      "comment": null
+    }
+  $type: |-
+    {
+      "title": "ReviewRequest",
+      "type": "object",
+      "properties": {
+        "rating": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5,
+          "title": "Rating"
+        },
+        "comment": {
+          "title": "Comment",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "rating"
+      ]
+    }
+auth:
+  type: bearer
+  credentials:
+    token: "{{bearerToken}}"
+settings: {}
+examples: ./.resources/Create Review.resources/examples
+order: 1000

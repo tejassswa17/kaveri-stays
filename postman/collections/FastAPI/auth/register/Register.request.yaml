@@ -1,0 +1,45 @@
+$kind: http-request
+description: ""
+url: "{{baseUrl}}/auth/register"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+body:
+  type: json
+  content: |-
+    {
+      "full_name": "string",
+      "email": "irQYwZq4A@YXuftkudmNYbFiTKhXllS.abi",
+      "password": "stringstring"
+    }
+  $type: |-
+    {
+      "title": "RegisterRequest",
+      "type": "object",
+      "properties": {
+        "full_name": {
+          "type": "string",
+          "minLength": 1,
+          "title": "Full Name"
+        },
+        "email": {
+          "type": "string",
+          "title": "Email",
+          "format": "email"
+        },
+        "password": {
+          "type": "string",
+          "minLength": 8,
+          "title": "Password"
+        }
+      },
+      "required": [
+        "full_name",
+        "email",
+        "password"
+      ]
+    }
+settings: {}
+examples: ./.resources/Register.resources/examples
+order: 1000

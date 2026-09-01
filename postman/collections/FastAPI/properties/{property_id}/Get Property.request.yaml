@@ -1,0 +1,30 @@
+$kind: http-request
+description: ""
+url: "{{baseUrl}}/properties/:property_id"
+method: GET
+headers:
+  Accept: application/json
+pathVariables:
+  - key: property_id
+    value: "5966"
+    disabled: false
+    description: ""
+    $type: |-
+      {
+        "type": "object",
+        "properties": {
+          "value": {
+            "title": "Property Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+body:
+  type: text
+  content: ""
+settings: {}
+examples: ./.resources/Get Property.resources/examples
+order: 1000

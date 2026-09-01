@@ -1,0 +1,98 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/bookings/:booking_id"
+  method: GET
+  headers:
+    - key: Accept
+      value: application/json
+    - key: Authorization
+      value: Bearer <token>
+      description: "Added as a part of security scheme: bearer"
+  pathVariables:
+    booking_id: "7720"
+  body:
+    type: text
+    content: ""
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "booking_id": 7018,
+        "guest_id": 5881,
+        "room_id": 9234,
+        "check_in": "1948-03-01",
+        "check_out": "1980-01-12",
+        "guests": 8912,
+        "status": "confirmed",
+        "total_amount": "string"
+      }
+    $type: |-
+      {
+        "title": "BookingOut",
+        "type": "object",
+        "properties": {
+          "booking_id": {
+            "type": "integer",
+            "title": "Booking Id"
+          },
+          "guest_id": {
+            "type": "integer",
+            "title": "Guest Id"
+          },
+          "room_id": {
+            "type": "integer",
+            "title": "Room Id"
+          },
+          "check_in": {
+            "type": "string",
+            "title": "Check In",
+            "format": "date"
+          },
+          "check_out": {
+            "type": "string",
+            "title": "Check Out",
+            "format": "date"
+          },
+          "guests": {
+            "type": "integer",
+            "title": "Guests"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "checked_in",
+              "checked_out",
+              "cancelled",
+              "no_show"
+            ],
+            "title": "BookingStatus"
+          },
+          "total_amount": {
+            "title": "Total Amount",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "booking_id",
+          "guest_id",
+          "room_id",
+          "check_in",
+          "check_out",
+          "guests",
+          "status"
+        ]
+      }
+order: 1000

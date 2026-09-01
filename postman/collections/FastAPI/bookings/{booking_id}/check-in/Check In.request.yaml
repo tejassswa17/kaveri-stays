@@ -1,0 +1,34 @@
+$kind: http-request
+description: ""
+url: "{{baseUrl}}/bookings/:booking_id/check-in"
+method: POST
+headers:
+  Accept: application/json
+pathVariables:
+  - key: booking_id
+    value: "7720"
+    disabled: false
+    description: ""
+    $type: |-
+      {
+        "type": "object",
+        "properties": {
+          "value": {
+            "title": "Booking Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "value"
+        ]
+      }
+body:
+  type: text
+  content: ""
+auth:
+  type: bearer
+  credentials:
+    token: "{{bearerToken}}"
+settings: {}
+examples: ./.resources/Check In.resources/examples
+order: 1000

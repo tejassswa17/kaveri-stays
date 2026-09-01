@@ -1,0 +1,114 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/properties/:property_id/rooms?limit=20&offset=0"
+  method: GET
+  headers:
+    - key: Accept
+      value: application/json
+    - key: Authorization
+      value: Bearer <token>
+      description: "Added as a part of security scheme: bearer"
+  queryParams:
+    limit: "20"
+    offset: "0"
+  pathVariables:
+    property_id: "5966"
+  body:
+    type: text
+    content: ""
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "items": [
+          {
+            "room_id": 4984,
+            "room_number": "string",
+            "room_type": "string",
+            "max_occupancy": 5309
+          },
+          {
+            "room_id": 4273,
+            "room_number": "string",
+            "room_type": "string",
+            "max_occupancy": 6078
+          }
+        ],
+        "meta": {
+          "limit": 7642,
+          "offset": 2770,
+          "total": 1997
+        }
+      }
+    $type: |-
+      {
+        "title": "RoomPage",
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "title": "Items",
+            "items": {
+              "title": "RoomOut",
+              "type": "object",
+              "properties": {
+                "room_id": {
+                  "type": "integer",
+                  "title": "Room Id"
+                },
+                "room_number": {
+                  "type": "string",
+                  "title": "Room Number"
+                },
+                "room_type": {
+                  "type": "string",
+                  "title": "Room Type"
+                },
+                "max_occupancy": {
+                  "type": "integer",
+                  "title": "Max Occupancy"
+                }
+              },
+              "required": [
+                "room_id",
+                "room_number",
+                "room_type",
+                "max_occupancy"
+              ]
+            }
+          },
+          "meta": {
+            "type": "object",
+            "title": "PageMeta",
+            "properties": {
+              "limit": {
+                "type": "integer",
+                "title": "Limit"
+              },
+              "offset": {
+                "type": "integer",
+                "title": "Offset"
+              },
+              "total": {
+                "type": "integer",
+                "title": "Total"
+              }
+            },
+            "required": [
+              "limit",
+              "offset",
+              "total"
+            ]
+          }
+        },
+        "required": [
+          "items",
+          "meta"
+        ]
+      }
+order: 1000

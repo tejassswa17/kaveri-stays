@@ -1,0 +1,53 @@
+$kind: http-example
+request:
+  url: "{{baseUrl}}/guests/:guest_id"
+  method: GET
+  headers:
+    - key: Accept
+      value: application/json
+    - key: Authorization
+      value: Bearer <token>
+      description: "Added as a part of security scheme: bearer"
+  pathVariables:
+    guest_id: "3709"
+  body:
+    type: text
+    content: ""
+response:
+  statusCode: 200
+  statusText: OK
+  headers:
+    Content-Type: application/json
+  body:
+    type: json
+    content: |-
+      {
+        "guest_id": 7677,
+        "full_name": "string",
+        "email": "string"
+      }
+    $type: |-
+      {
+        "title": "GuestOut",
+        "type": "object",
+        "properties": {
+          "guest_id": {
+            "type": "integer",
+            "title": "Guest Id"
+          },
+          "full_name": {
+            "type": "string",
+            "title": "Full Name"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email"
+          }
+        },
+        "required": [
+          "guest_id",
+          "full_name",
+          "email"
+        ]
+      }
+order: 1000

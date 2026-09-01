@@ -1,0 +1,80 @@
+$kind: http-request
+description: ""
+url: "{{baseUrl}}/bookings"
+method: POST
+headers:
+  Content-Type: application/json
+  Accept: application/json
+body:
+  type: json
+  content: |-
+    {
+      "room_id": 1136,
+      "check_in": "2008-04-12",
+      "check_out": "1985-04-19",
+      "guests": 7999,
+      "guest_id": 5837,
+      "deposit": "string"
+    }
+  $type: |-
+    {
+      "title": "BookingRequest",
+      "type": "object",
+      "properties": {
+        "room_id": {
+          "type": "integer",
+          "minimum": 1,
+          "title": "Room Id"
+        },
+        "check_in": {
+          "type": "string",
+          "title": "Check In",
+          "format": "date"
+        },
+        "check_out": {
+          "type": "string",
+          "title": "Check Out",
+          "format": "date"
+        },
+        "guests": {
+          "type": "integer",
+          "minimum": 1,
+          "title": "Guests"
+        },
+        "guest_id": {
+          "title": "Guest Id",
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deposit": {
+          "title": "Deposit",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "room_id",
+        "check_in",
+        "check_out",
+        "guests"
+      ]
+    }
+auth:
+  type: bearer
+  credentials:
+    token: "{{bearerToken}}"
+settings: {}
+examples: ./.resources/Create Booking.resources/examples
+order: 1000
