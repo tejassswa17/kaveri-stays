@@ -3,7 +3,7 @@ import type { InternalAxiosRequestConfig } from 'axios';
 import type { ErrorEnvelope, RefreshResponse } from '../types';
 
 export const apiClient = axios.create({
-  baseURL: '',
+  baseURL: import.meta.env.VITE_API_BASE_URL || '',
   timeout: 10000,
   headers: {
     'Content-Type': 'application/json',
@@ -108,7 +108,7 @@ apiClient.interceptors.response.use(
       }
 
       try {
-        const refreshResponse = await axios.post<RefreshResponse>(
+        const refreshResponse = await apiClient.post<RefreshResponse>(
           '/auth/refresh',
           { refresh_token: refreshToken },
           { headers: { 'Content-Type': 'application/json' }, timeout: 8000 }

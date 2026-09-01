@@ -1,9 +1,11 @@
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
+import os
 import time
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from psycopg2 import Error as PsycopgError
 from psycopg2.pool import PoolError
@@ -45,6 +47,29 @@ app = FastAPI(
     title="Kaveri Stays API",
     version="0.1.0",
     description="FastAPI hotel management API for Kaveri Stays",
+)
+
+ALLOWED_ORIGINS = [
+    "https://kaveri-stays-2.onrender.com",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+cors_origins_env = os.environ.get("CORS_ALLOWED_ORIGINS")
+if cors_origins_env:
+    for origin in cors_origins_env.split(","):
+        o = origin.strip()
+        if o and o not in ALLOWED_ORIGINS:
+            ALLOWED_ORIGINS.append(o)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
