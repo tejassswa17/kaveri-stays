@@ -1,8 +1,12 @@
+from collections import defaultdict
 from decimal import Decimal, InvalidOperation
+import time
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from psycopg2 import Error as PsycopgError
+from psycopg2.pool import PoolError
 
 from app.auth import (
     create_access_token,
@@ -12,25 +16,62 @@ from app.auth import (
     verify_password,
     verify_refresh_token,
 )
-from app.database import get_connection
+from app.database import get_connection, release_connection
 from app.dependencies import get_current_user
 from app.models import (
+    AuthMeResponse,
     BookingRequest,
+    BookingResponse,
+    ErrorEnvelope,
+    HomeResponse,
     LoginRequest,
+    LoginResponse,
     LogoutRequest,
+    LogoutResponse,
+    PaymentListResponse,
     PaymentRequest,
+    PaymentResponse,
     RefreshRequest,
+    RefreshResponse,
     RegisterRequest,
+    RegisterResponse,
     ReviewRequest,
+    ReviewResponse,
 )
 from app.read_api import router as read_router
 
 
-app = FastAPI()
+app = FastAPI(
+    title="Kaveri Stays API",
+    version="0.1.0",
+    description="FastAPI hotel management API for Kaveri Stays",
+)
 
 
 # =========================================================
-# DATABASE ERROR MAPPING
+# RATE LIMITING (Task 9.3)
+# =========================================================
+
+_login_attempts: dict[str, list[float]] = defaultdict(list)
+LOGIN_RATE_LIMIT = 10  # Max 10 attempts per minute
+LOGIN_WINDOW_SECONDS = 60
+
+
+def check_login_rate_limit(key: str):
+    now = time.time()
+    attempts = [t for t in _login_attempts[key] if now - t < LOGIN_WINDOW_SECONDS]
+    if len(attempts) >= LOGIN_RATE_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Please try again later.",
+            headers={"Retry-After": str(LOGIN_WINDOW_SECONDS)},
+        )
+    attempts.append(now)
+    _login_attempts[key] = attempts
+
+
+# =========================================================
+# DATABASE ERROR MAPPING & UNIFIED ERROR HANDLERS (Task 3.10 & 5.3)
 # =========================================================
 
 SQLSTATE_STATUS = {
@@ -43,7 +84,7 @@ SQLSTATE_STATUS = {
 
 
 @app.exception_handler(PsycopgError)
-async def database_error_handler(request, exc):
+async def database_error_handler(request: Request, exc: PsycopgError):
     constraint = getattr(
         exc.diag,
         "constraint_name",
@@ -52,33 +93,24 @@ async def database_error_handler(request, exc):
 
     if constraint == "no_overlapping_room_bookings":
         message = "Room is already taken"
-
     elif constraint == "reviews_booking_id_key":
         message = "Booking already has a review"
-
     elif constraint == "chk_payment_amount":
         message = "Payment amount must be greater than zero"
-
     elif constraint == "chk_review_rating":
         message = "Rating must be between 1 and 5"
-
     elif constraint == "fk_bookings_guest":
         message = "Guest not found"
-
     elif constraint == "fk_bookings_room":
         message = "Room not found"
-
     elif constraint == "fk_payments_booking":
         message = "Booking not found"
-
     else:
         message = "Database operation failed"
 
+    status_code = SQLSTATE_STATUS.get(exc.pgcode, 500)
     return JSONResponse(
-        status_code=SQLSTATE_STATUS.get(
-            exc.pgcode,
-            500,
-        ),
+        status_code=status_code,
         content={
             "error": "DATABASE_ERROR",
             "message": message,
@@ -87,12 +119,73 @@ async def database_error_handler(request, exc):
     )
 
 
+@app.exception_handler(PoolError)
+async def pool_error_handler(request: Request, exc: PoolError):
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "SERVICE_UNAVAILABLE",
+            "message": "Connection pool exhausted",
+            "details": [],
+        },
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    headers = getattr(exc, "headers", None)
+    error_code = "UNAUTHORIZED" if exc.status_code == 401 else (
+        "FORBIDDEN" if exc.status_code == 403 else (
+            "NOT_FOUND" if exc.status_code == 404 else (
+                "CONFLICT" if exc.status_code == 409 else (
+                    "UNPROCESSABLE_ENTITY" if exc.status_code == 422 else (
+                        "RATE_LIMITED" if exc.status_code == 429 else "HTTP_ERROR"
+                    )
+                )
+            )
+        )
+    )
+    return JSONResponse(
+        status_code=exc.status_code,
+        headers=headers,
+        content={
+            "error": error_code,
+            "message": str(exc.detail),
+            "details": [],
+        },
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    details = []
+    for err in exc.errors():
+        details.append({
+            "loc": list(err.get("loc", [])),
+            "msg": str(err.get("msg", "")),
+            "type": str(err.get("type", "validation_error")),
+        })
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "VALIDATION_ERROR",
+            "message": "Validation failed",
+            "details": details,
+        },
+    )
+
+
 # =========================================================
 # HOME
 # =========================================================
 
-
-@app.get("/")
+@app.get(
+    "/",
+    response_model=HomeResponse,
+    tags=["Home"],
+    summary="Home / Health Check",
+    description="Returns the running status of the Kaveri Stays API.",
+)
 def home():
     return {
         "message": "Kaveri Stays API is running"
@@ -103,8 +196,19 @@ def home():
 # AUTHENTICATION
 # =========================================================
 
-
-@app.post("/auth/register")
+@app.post(
+    "/auth/register",
+    response_model=RegisterResponse,
+    status_code=201,
+    tags=["Authentication"],
+    summary="Register Guest",
+    description="Registers a new guest account. Staff accounts cannot be self-registered.",
+    responses={
+        201: {"model": RegisterResponse, "description": "Guest account successfully created"},
+        409: {"model": ErrorEnvelope, "description": "Email already registered"},
+        422: {"model": ErrorEnvelope, "description": "Validation error"},
+    },
+)
 def register(data: RegisterRequest):
     conn = get_connection()
     cur = conn.cursor()
@@ -193,11 +297,27 @@ def register(data: RegisterRequest):
 
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 
-@app.post("/auth/login")
-def login(data: LoginRequest):
+@app.post(
+    "/auth/login",
+    response_model=LoginResponse,
+    tags=["Authentication"],
+    summary="Login",
+    description="Authenticates a user with email and password and returns access and refresh tokens.",
+    responses={
+        200: {"model": LoginResponse, "description": "Login successful"},
+        401: {"model": ErrorEnvelope, "description": "Invalid email or password"},
+        422: {"model": ErrorEnvelope, "description": "Validation error"},
+        429: {"model": ErrorEnvelope, "description": "Too many login attempts"},
+    },
+)
+def login(data: LoginRequest, request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+    rate_key = f"{client_ip}:{data.email.lower()}"
+    check_login_rate_limit(rate_key)
+
     conn = get_connection()
     cur = conn.cursor()
 
@@ -281,15 +401,27 @@ def login(data: LoginRequest):
 
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 
-@app.post("/auth/refresh")
+@app.post(
+    "/auth/refresh",
+    response_model=RefreshResponse,
+    tags=["Authentication"],
+    summary="Refresh Token",
+    description="Rotates refresh token and issues a new access token.",
+    responses={
+        200: {"model": RefreshResponse, "description": "Token refreshed successfully"},
+        401: {"model": ErrorEnvelope, "description": "Invalid or expired refresh token"},
+        422: {"model": ErrorEnvelope, "description": "Validation error"},
+    },
+)
 def refresh_token(data: RefreshRequest):
     conn = get_connection()
     cur = conn.cursor()
 
     try:
+        token_hash = hash_refresh_token(data.refresh_token)
         cur.execute(
             """
             SELECT
@@ -297,23 +429,36 @@ def refresh_token(data: RefreshRequest):
                 account_id,
                 token_hash
             FROM refresh_tokens
-            WHERE revoked_at IS NULL
-              AND expires_at > CURRENT_TIMESTAMP
-            ORDER BY refresh_token_id;
-            """
+            WHERE token_hash = %s
+              AND revoked_at IS NULL
+              AND expires_at > CURRENT_TIMESTAMP;
+            """,
+            (token_hash,),
         )
 
-        rows = cur.fetchall()
+        matching_row = cur.fetchone()
 
-        matching_row = None
-
-        for row in rows:
-            if verify_refresh_token(
-                data.refresh_token,
-                row[2],
-            ):
-                matching_row = row
-                break
+        if matching_row is None:
+            cur.execute(
+                """
+                SELECT
+                    refresh_token_id,
+                    account_id,
+                    token_hash
+                FROM refresh_tokens
+                WHERE revoked_at IS NULL
+                  AND expires_at > CURRENT_TIMESTAMP
+                  AND token_hash LIKE '$2%'
+                ORDER BY refresh_token_id;
+                """
+            )
+            for row in cur.fetchall():
+                if verify_refresh_token(
+                    data.refresh_token,
+                    row[2],
+                ):
+                    matching_row = row
+                    break
 
         if matching_row is None:
             raise HTTPException(
@@ -399,36 +544,59 @@ def refresh_token(data: RefreshRequest):
 
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 
-@app.post("/auth/logout")
+@app.post(
+    "/auth/logout",
+    response_model=LogoutResponse,
+    tags=["Authentication"],
+    summary="Logout",
+    description="Revokes the given refresh token.",
+    responses={
+        200: {"model": LogoutResponse, "description": "Logged out successfully"},
+        401: {"model": ErrorEnvelope, "description": "Invalid refresh token"},
+        422: {"model": ErrorEnvelope, "description": "Validation error"},
+    },
+)
 def logout(data: LogoutRequest):
     conn = get_connection()
     cur = conn.cursor()
 
     try:
+        token_hash = hash_refresh_token(data.refresh_token)
         cur.execute(
             """
             SELECT
-                refresh_token_id,
-                token_hash
+                refresh_token_id
             FROM refresh_tokens
-            WHERE revoked_at IS NULL;
-            """
+            WHERE token_hash = %s
+              AND revoked_at IS NULL;
+            """,
+            (token_hash,),
         )
 
-        rows = cur.fetchall()
+        matching_row = cur.fetchone()
+        matching_id = matching_row[0] if matching_row else None
 
-        matching_id = None
-
-        for row in rows:
-            if verify_refresh_token(
-                data.refresh_token,
-                row[1],
-            ):
-                matching_id = row[0]
-                break
+        if matching_id is None:
+            cur.execute(
+                """
+                SELECT
+                    refresh_token_id,
+                    token_hash
+                FROM refresh_tokens
+                WHERE revoked_at IS NULL
+                  AND token_hash LIKE '$2%';
+                """
+            )
+            for row in cur.fetchall():
+                if verify_refresh_token(
+                    data.refresh_token,
+                    row[1],
+                ):
+                    matching_id = row[0]
+                    break
 
         if matching_id is None:
             raise HTTPException(
@@ -457,15 +625,20 @@ def logout(data: LogoutRequest):
 
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 
-# =========================================================
-# AUTH ME
-# =========================================================
-
-
-@app.get("/auth/me")
+@app.get(
+    "/auth/me",
+    response_model=AuthMeResponse,
+    tags=["Authentication"],
+    summary="Get Current User Account",
+    description="Returns the account ID and role for the authenticated caller.",
+    responses={
+        200: {"model": AuthMeResponse, "description": "Account details"},
+        401: {"model": ErrorEnvelope, "description": "Invalid or expired token"},
+    },
+)
 def auth_me(
     current_user: dict = Depends(get_current_user),
 ):
@@ -476,10 +649,8 @@ def auth_me(
 
 
 # =========================================================
-# STAGE 5
-# BOOKING HELPERS
+# STAGE 5 BOOKING HELPERS
 # =========================================================
-
 
 def get_booking(
     cur,
@@ -533,7 +704,6 @@ def check_booking_access(
 
     # Guest can see only their own booking.
     if role == "guest":
-
         cur.execute(
             """
             SELECT guest_id
@@ -559,7 +729,6 @@ def check_booking_access(
         "staff",
         "manager",
     }:
-
         cur.execute(
             """
             SELECT property_id
@@ -589,11 +758,8 @@ def calculate_booking_total(
 ):
     """
     Resolve the nightly rate server-side.
-
-    Each night is looked up separately so a booking
-    crossing two rate periods is charged correctly.
+    Each night is looked up separately so a booking crossing two rate periods is charged correctly.
     """
-
     cur.execute(
         """
         SELECT
@@ -660,36 +826,40 @@ def booking_output(
 
 
 # =========================================================
-# 5.1 POST /bookings
+# BOOKINGS
 # =========================================================
-
 
 @app.post(
     "/bookings",
+    response_model=BookingResponse,
     status_code=201,
+    tags=["Bookings"],
+    summary="Create Booking",
+    description="Creates a new room booking. Guest count, room availability, and rate plans are enforced server-side.",
+    responses={
+        201: {"model": BookingResponse, "description": "Booking successfully created"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Forbidden for property"},
+        404: {"model": ErrorEnvelope, "description": "Room or rate plan not found"},
+        409: {"model": ErrorEnvelope, "description": "Room already booked or payment exceeds total"},
+        422: {"model": ErrorEnvelope, "description": "Invalid booking dates or guest count"},
+    },
 )
 def create_booking(
     booking: BookingRequest,
-    current_user: dict = Depends(
-        get_current_user
-    ),
+    current_user: dict = Depends(get_current_user),
 ):
     conn = get_connection()
     cur = conn.cursor()
 
     try:
-        account_id = int(
-            current_user["sub"]
-        )
-
+        account_id = int(current_user["sub"])
         role = current_user["role"]
 
         # -------------------------------------------------
         # Determine guest
         # -------------------------------------------------
-
         if role == "guest":
-
             cur.execute(
                 """
                 SELECT guest_id
@@ -702,7 +872,7 @@ def create_booking(
 
             account = cur.fetchone()
 
-            if account is None:
+            if account is None or account[0] is None:
                 raise HTTPException(
                     status_code=401,
                     detail="Guest account not found",
@@ -711,7 +881,6 @@ def create_booking(
             guest_id = account[0]
 
         else:
-
             if booking.guest_id is None:
                 raise HTTPException(
                     status_code=422,
@@ -723,7 +892,6 @@ def create_booking(
         # -------------------------------------------------
         # Room + capacity
         # -------------------------------------------------
-
         cur.execute(
             """
             SELECT
@@ -756,12 +924,10 @@ def create_booking(
         # -------------------------------------------------
         # Property scope
         # -------------------------------------------------
-
         if role in {
             "staff",
             "manager",
         }:
-
             cur.execute(
                 """
                 SELECT property_id
@@ -784,11 +950,7 @@ def create_booking(
 
         # -------------------------------------------------
         # INSERT BOOKING
-        #
-        # The room overlap exclusion constraint is the
-        # final concurrency protection.
         # -------------------------------------------------
-
         cur.execute(
             """
             INSERT INTO bookings
@@ -827,7 +989,6 @@ def create_booking(
         # -------------------------------------------------
         # Calculate total from rate_plans
         # -------------------------------------------------
-
         total_amount = calculate_booking_total(
             cur,
             booking_id,
@@ -842,9 +1003,7 @@ def create_booking(
         # -------------------------------------------------
         # DEPOSIT
         # -------------------------------------------------
-
         if booking.deposit is not None:
-
             try:
                 deposit = Decimal(
                     str(booking.deposit)
@@ -889,12 +1048,9 @@ def create_booking(
                 ),
             )
 
-        # =================================================
-        # TRANSACTION COMMIT
-        #
-        # Booking + deposit commit together.
-        # =================================================
-
+        # -------------------------------------------------
+        # COMMIT
+        # -------------------------------------------------
         conn.commit()
 
         return booking_output(
@@ -908,13 +1064,12 @@ def create_booking(
 
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 
 # =========================================================
-# 5.4 / 5.5 BOOKING STATE MACHINE
+# STATE MACHINE TRANSITIONS
 # =========================================================
-
 
 ALLOWED_TRANSITIONS = {
     "confirmed": {
@@ -982,22 +1137,26 @@ def change_booking_status(
 
     finally:
         cur.close()
-        conn.close()
-
-
-# =========================================================
-# CHECK-IN
-# =========================================================
+        release_connection(conn)
 
 
 @app.post(
-    "/bookings/{booking_id}/check-in"
+    "/bookings/{booking_id}/check-in",
+    response_model=BookingResponse,
+    tags=["Bookings"],
+    summary="Check In",
+    description="Marks a confirmed booking as checked_in. Staff/Manager only.",
+    responses={
+        200: {"model": BookingResponse, "description": "Booking checked in"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Staff only"},
+        404: {"model": ErrorEnvelope, "description": "Booking not found"},
+        409: {"model": ErrorEnvelope, "description": "Illegal transition"},
+    },
 )
 def check_in(
     booking_id: int,
-    current_user: dict = Depends(
-        get_current_user
-    ),
+    current_user: dict = Depends(get_current_user),
 ):
     if current_user["role"] not in {
         "staff",
@@ -1016,19 +1175,23 @@ def check_in(
     )
 
 
-# =========================================================
-# CHECK-OUT
-# =========================================================
-
-
 @app.post(
-    "/bookings/{booking_id}/check-out"
+    "/bookings/{booking_id}/check-out",
+    response_model=BookingResponse,
+    tags=["Bookings"],
+    summary="Check Out",
+    description="Marks a checked_in booking as checked_out. Staff/Manager only.",
+    responses={
+        200: {"model": BookingResponse, "description": "Booking checked out"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Staff only"},
+        404: {"model": ErrorEnvelope, "description": "Booking not found"},
+        409: {"model": ErrorEnvelope, "description": "Illegal transition"},
+    },
 )
 def check_out(
     booking_id: int,
-    current_user: dict = Depends(
-        get_current_user
-    ),
+    current_user: dict = Depends(get_current_user),
 ):
     if current_user["role"] not in {
         "staff",
@@ -1047,19 +1210,23 @@ def check_out(
     )
 
 
-# =========================================================
-# CANCEL
-# =========================================================
-
-
 @app.post(
-    "/bookings/{booking_id}/cancel"
+    "/bookings/{booking_id}/cancel",
+    response_model=BookingResponse,
+    tags=["Bookings"],
+    summary="Cancel Booking",
+    description="Cancels a confirmed booking. Guests may cancel their own booking.",
+    responses={
+        200: {"model": BookingResponse, "description": "Booking cancelled"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Forbidden"},
+        404: {"model": ErrorEnvelope, "description": "Booking not found"},
+        409: {"model": ErrorEnvelope, "description": "Illegal transition"},
+    },
 )
 def cancel_booking(
     booking_id: int,
-    current_user: dict = Depends(
-        get_current_user
-    ),
+    current_user: dict = Depends(get_current_user),
 ):
     return change_booking_status(
         booking_id,
@@ -1068,19 +1235,23 @@ def cancel_booking(
     )
 
 
-# =========================================================
-# NO-SHOW
-# =========================================================
-
-
 @app.post(
-    "/bookings/{booking_id}/no-show"
+    "/bookings/{booking_id}/no-show",
+    response_model=BookingResponse,
+    tags=["Bookings"],
+    summary="No-Show Booking",
+    description="Marks a booking as no-show when guest does not arrive. Staff/Manager only.",
+    responses={
+        200: {"model": BookingResponse, "description": "Booking marked no-show"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Staff only"},
+        404: {"model": ErrorEnvelope, "description": "Booking not found"},
+        409: {"model": ErrorEnvelope, "description": "Illegal transition"},
+    },
 )
 def no_show(
     booking_id: int,
-    current_user: dict = Depends(
-        get_current_user
-    ),
+    current_user: dict = Depends(get_current_user),
 ):
     if current_user["role"] not in {
         "staff",
@@ -1100,18 +1271,25 @@ def no_show(
 
 
 # =========================================================
-# 5.6 LIST PAYMENTS
+# PAYMENTS
 # =========================================================
 
-
 @app.get(
-    "/bookings/{booking_id}/payments"
+    "/bookings/{booking_id}/payments",
+    response_model=PaymentListResponse,
+    tags=["Payments"],
+    summary="List Payments",
+    description="Lists all recorded payments and remaining balance for a booking.",
+    responses={
+        200: {"model": PaymentListResponse, "description": "Payment list and balance"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Forbidden"},
+        404: {"model": ErrorEnvelope, "description": "Booking not found"},
+    },
 )
 def list_payments(
     booking_id: int,
-    current_user: dict = Depends(
-        get_current_user
-    ),
+    current_user: dict = Depends(get_current_user),
 ):
     conn = get_connection()
     cur = conn.cursor()
@@ -1181,17 +1359,25 @@ def list_payments(
 
     finally:
         cur.close()
-        conn.close()
-
-
-# =========================================================
-# 5.6 RECORD PAYMENT
-# =========================================================
+        release_connection(conn)
 
 
 @app.post(
     "/bookings/{booking_id}/payments",
+    response_model=PaymentResponse,
     status_code=201,
+    tags=["Payments"],
+    summary="Record Payment",
+    description="Records a payment installment against a booking. Requires an Idempotency-Key header.",
+    responses={
+        201: {"model": PaymentResponse, "description": "Payment successfully recorded"},
+        200: {"model": PaymentResponse, "description": "Idempotent payment replay"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Forbidden"},
+        404: {"model": ErrorEnvelope, "description": "Booking not found"},
+        409: {"model": ErrorEnvelope, "description": "Idempotency conflict or payment exceeds total"},
+        422: {"model": ErrorEnvelope, "description": "Invalid payment amount"},
+    },
 )
 def record_payment(
     booking_id: int,
@@ -1201,9 +1387,7 @@ def record_payment(
         ...,
         alias="Idempotency-Key",
     ),
-    current_user: dict = Depends(
-        get_current_user
-    ),
+    current_user: dict = Depends(get_current_user),
 ):
     conn = get_connection()
     cur = conn.cursor()
@@ -1216,9 +1400,8 @@ def record_payment(
         )
 
         # -------------------------------------------------
-        # Look for previous request.
+        # Look for previous request with same idempotency key
         # -------------------------------------------------
-
         cur.execute(
             """
             SELECT
@@ -1236,17 +1419,13 @@ def record_payment(
         existing = cur.fetchone()
 
         if existing is not None:
-
-            # Same key + same body = replay.
+            # Same key + same booking + same amount + same method = replay.
             if (
                 existing[1] == booking_id
-                and str(existing[2])
-                == str(Decimal(data.amount))
-                and existing[3]
-                == data.method
+                and str(existing[2]) == str(Decimal(data.amount))
+                and existing[3] == data.method
             ):
                 response.status_code = 200
-
                 return {
                     "payment_id": existing[0],
                     "booking_id": existing[1],
@@ -1262,13 +1441,10 @@ def record_payment(
             )
 
         # -------------------------------------------------
-        # Validate amount.
+        # Validate amount
         # -------------------------------------------------
-
         try:
-            amount = Decimal(
-                str(data.amount)
-            )
+            amount = Decimal(str(data.amount))
         except InvalidOperation:
             raise HTTPException(
                 status_code=422,
@@ -1282,17 +1458,12 @@ def record_payment(
             )
 
         # -------------------------------------------------
-        # Booking total.
+        # Booking total and balance check
         # -------------------------------------------------
-
         total_amount = calculate_booking_total(
             cur,
             booking_id,
         )
-
-        # -------------------------------------------------
-        # Existing payments.
-        # -------------------------------------------------
 
         cur.execute(
             """
@@ -1308,10 +1479,6 @@ def record_payment(
 
         total_paid = cur.fetchone()[0]
 
-        # -------------------------------------------------
-        # 5.7 Do not exceed booking total.
-        # -------------------------------------------------
-
         if total_paid + amount > total_amount:
             raise HTTPException(
                 status_code=409,
@@ -1319,9 +1486,8 @@ def record_payment(
             )
 
         # -------------------------------------------------
-        # Insert payment.
+        # Insert payment
         # -------------------------------------------------
-
         cur.execute(
             """
             INSERT INTO payments
@@ -1354,7 +1520,6 @@ def record_payment(
         )
 
         row = cur.fetchone()
-
         conn.commit()
 
         return {
@@ -1371,24 +1536,33 @@ def record_payment(
 
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 
 # =========================================================
-# 5.8 REVIEW
+# REVIEWS
 # =========================================================
-
 
 @app.post(
     "/bookings/{booking_id}/review",
+    response_model=ReviewResponse,
     status_code=201,
+    tags=["Reviews"],
+    summary="Create Review",
+    description="Allows a guest to submit a rating (1-5) and comment after checking out.",
+    responses={
+        201: {"model": ReviewResponse, "description": "Review successfully submitted"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Guests only or checkout required"},
+        404: {"model": ErrorEnvelope, "description": "Booking not found"},
+        409: {"model": ErrorEnvelope, "description": "Booking already has a review"},
+        422: {"model": ErrorEnvelope, "description": "Invalid rating or comment"},
+    },
 )
 def create_review(
     booking_id: int,
     data: ReviewRequest,
-    current_user: dict = Depends(
-        get_current_user
-    ),
+    current_user: dict = Depends(get_current_user),
 ):
     if current_user["role"] != "guest":
         raise HTTPException(
@@ -1406,19 +1580,11 @@ def create_review(
             current_user,
         )
 
-        # -------------------------------------------------
-        # Review only after checkout.
-        # -------------------------------------------------
-
         if booking[6] != "checked_out":
             raise HTTPException(
                 status_code=403,
                 detail="Review allowed only after checkout",
             )
-
-        # -------------------------------------------------
-        # Rating is also validated by Pydantic and the DB.
-        # -------------------------------------------------
 
         cur.execute(
             """
@@ -1448,7 +1614,6 @@ def create_review(
         )
 
         row = cur.fetchone()
-
         conn.commit()
 
         return {
@@ -1464,11 +1629,11 @@ def create_review(
 
     finally:
         cur.close()
-        conn.close()
+        release_connection(conn)
 
 
 # =========================================================
-# STAGE 4 READ API
+# MOUNT READ API ROUTER
 # =========================================================
 
 app.include_router(read_router)

@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict
 
-from app.database import get_connection
+from app.database import get_connection, release_connection
+from app.models import ErrorEnvelope
 
 
 router = APIRouter()
@@ -19,7 +20,6 @@ bearer = HTTPBearer(auto_error=False)
 # =========================================================
 # ENUMS
 # =========================================================
-
 
 class BookingStatus(str, Enum):
     confirmed = "confirmed"
@@ -32,7 +32,6 @@ class BookingStatus(str, Enum):
 # =========================================================
 # RESPONSE MODELS
 # =========================================================
-
 
 class PropertyOut(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -145,9 +144,8 @@ class ReportPage(BaseModel):
 
 
 # =========================================================
-# AUTHENTICATION
+# AUTHENTICATION & DEPENDENCIES
 # =========================================================
-
 
 def current_account(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
@@ -222,25 +220,28 @@ def require_manager(
 # DATABASE DEPENDENCY
 # =========================================================
 
-
 def db():
     conn = get_connection()
-
     try:
         yield conn
-
     finally:
-        conn.close()
+        release_connection(conn)
 
 
 # =========================================================
 # 4.1 PROPERTIES
 # =========================================================
 
-
 @router.get(
     "/properties",
     response_model=PropertyPage,
+    tags=["Properties"],
+    summary="List Properties",
+    description="Returns a paginated list of all hotel properties.",
+    responses={
+        200: {"model": PropertyPage, "description": "List of properties"},
+        422: {"model": ErrorEnvelope, "description": "Validation error"},
+    },
 )
 def list_properties(
     limit: int = Query(
@@ -284,7 +285,6 @@ def list_properties(
     )
 
     rows = cur.fetchall()
-
     cur.close()
 
     return {
@@ -308,6 +308,14 @@ def list_properties(
 @router.get(
     "/properties/{property_id}",
     response_model=PropertyOut,
+    tags=["Properties"],
+    summary="Get Property",
+    description="Returns details for a single hotel property.",
+    responses={
+        200: {"model": PropertyOut, "description": "Property details"},
+        404: {"model": ErrorEnvelope, "description": "Property not found"},
+        422: {"model": ErrorEnvelope, "description": "Validation error"},
+    },
 )
 def get_property(
     property_id: int,
@@ -329,7 +337,6 @@ def get_property(
     )
 
     row = cur.fetchone()
-
     cur.close()
 
     if row is None:
@@ -350,10 +357,19 @@ def get_property(
 # ROOMS
 # =========================================================
 
-
 @router.get(
     "/properties/{property_id}/rooms",
     response_model=RoomPage,
+    tags=["Properties"],
+    summary="List Rooms",
+    description="Returns all rooms in a property. Staff/Manager/Owner only.",
+    responses={
+        200: {"model": RoomPage, "description": "List of rooms"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Forbidden for property"},
+        404: {"model": ErrorEnvelope, "description": "Property not found"},
+        422: {"model": ErrorEnvelope, "description": "Validation error"},
+    },
 )
 def list_rooms(
     property_id: int,
@@ -391,7 +407,6 @@ def list_rooms(
             or assigned[0] != property_id
         ):
             cur.close()
-
             raise HTTPException(
                 status_code=403,
                 detail="Forbidden",
@@ -431,7 +446,6 @@ def list_rooms(
     )
 
     rows = cur.fetchall()
-
     cur.close()
 
     return {
@@ -456,10 +470,16 @@ def list_rooms(
 # 4.1 AVAILABILITY
 # =========================================================
 
-
 @router.get(
     "/properties/{property_id}/availability",
     response_model=AvailabilityResponse,
+    tags=["Availability"],
+    summary="Check Availability",
+    description="Returns available rooms in a property for a given date range and optional room type.",
+    responses={
+        200: {"model": AvailabilityResponse, "description": "Available rooms with pricing"},
+        422: {"model": ErrorEnvelope, "description": "Invalid date range or parameters"},
+    },
 )
 def availability(
     property_id: int,
@@ -546,7 +566,6 @@ def availability(
     )
 
     rows = cur.fetchall()
-
     cur.close()
 
     return {
@@ -572,7 +591,6 @@ def availability(
 # 4.2 BOOKING LIST
 # =========================================================
 
-
 SORTS = {
     "check_in": "lower(b.stay) ASC",
     "-check_in": "lower(b.stay) DESC",
@@ -586,6 +604,15 @@ SORTS = {
 @router.get(
     "/bookings",
     response_model=BookingPage,
+    tags=["Bookings"],
+    summary="List Bookings",
+    description="Returns a paginated list of bookings filtered by status, dates, guest, and property.",
+    responses={
+        200: {"model": BookingPage, "description": "List of bookings"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Forbidden"},
+        422: {"model": ErrorEnvelope, "description": "Invalid parameters or sort field"},
+    },
 )
 def list_bookings(
     property_id: int | None = None,
@@ -631,22 +658,26 @@ def list_bookings(
     params = []
 
     # -----------------------------------------------------
-    # GUEST SCOPE
+    # GUEST SCOPE: Must map account_id to guest_id
     # -----------------------------------------------------
-
     if account["role"] == "guest":
-        conditions.append(
-            "b.guest_id = %s"
+        cur.execute(
+            """
+            SELECT guest_id
+            FROM accounts
+            WHERE account_id = %s;
+            """,
+            (account["account_id"],),
         )
+        acc_row = cur.fetchone()
+        scoped_guest_id = acc_row[0] if acc_row else -1
 
-        params.append(
-            account["account_id"]
-        )
+        conditions.append("b.guest_id = %s")
+        params.append(scoped_guest_id)
 
     # -----------------------------------------------------
     # STAFF / MANAGER PROPERTY SCOPE
     # -----------------------------------------------------
-
     elif account["role"] in {
         "staff",
         "manager",
@@ -667,86 +698,44 @@ def list_bookings(
             or assigned[0] is None
         ):
             cur.close()
-
             raise HTTPException(
                 status_code=403,
                 detail="Forbidden",
             )
 
-        conditions.append(
-            "r.property_id = %s"
-        )
-
-        params.append(
-            assigned[0]
-        )
+        conditions.append("r.property_id = %s")
+        params.append(assigned[0])
 
     # -----------------------------------------------------
     # FILTERS
     # -----------------------------------------------------
-
     if property_id is not None:
-        conditions.append(
-            "r.property_id = %s"
-        )
-
+        conditions.append("r.property_id = %s")
         params.append(property_id)
 
     if status is not None:
-        conditions.append(
-            "b.status = %s"
-        )
-
-        params.append(
-            status.value
-        )
+        conditions.append("b.status = %s")
+        params.append(status.value)
 
     if (
         guest_id is not None
         and account["role"] != "guest"
     ):
-        conditions.append(
-            "b.guest_id = %s"
-        )
-
+        conditions.append("b.guest_id = %s")
         params.append(guest_id)
 
     if from_ is not None:
         if to is not None:
-            conditions.append(
-                """
-                b.stay && daterange(
-                    %s,
-                    %s,
-                    '[)'
-                )
-                """
-            )
-
-            params.extend([
-                from_,
-                to,
-            ])
-
+            conditions.append("b.stay && daterange(%s, %s, '[)')")
+            params.extend([from_, to])
         else:
-            conditions.append(
-                "upper(b.stay) > %s"
-            )
-
+            conditions.append("upper(b.stay) > %s")
             params.append(from_)
-
     elif to is not None:
-        conditions.append(
-            "lower(b.stay) < %s"
-        )
-
+        conditions.append("lower(b.stay) < %s")
         params.append(to)
 
-    where_clause = (
-        " AND ".join(conditions)
-        if conditions
-        else "TRUE"
-    )
+    where_clause = " AND ".join(conditions) if conditions else "TRUE"
 
     amount_sql = """
         COALESCE(
@@ -758,10 +747,6 @@ def list_bookings(
             0
         )
     """
-
-    # -----------------------------------------------------
-    # TOTAL
-    # -----------------------------------------------------
 
     cur.execute(
         f"""
@@ -776,10 +761,6 @@ def list_bookings(
 
     total = cur.fetchone()[0]
 
-    # -----------------------------------------------------
-    # DATA
-    # -----------------------------------------------------
-
     cur.execute(
         f"""
         SELECT
@@ -791,30 +772,18 @@ def list_bookings(
             b.guests_count,
             b.status,
             {amount_sql} AS total_amount
-
         FROM bookings b
-
         JOIN rooms r
             ON r.room_id = b.room_id
-
         WHERE {where_clause}
-
         ORDER BY {SORTS[sort]}
-
         LIMIT %s
         OFFSET %s;
         """,
-        tuple(
-            params
-            + [
-                limit,
-                offset,
-            ]
-        ),
+        tuple(params + [limit, offset]),
     )
 
     rows = cur.fetchall()
-
     cur.close()
 
     return {
@@ -827,9 +796,7 @@ def list_bookings(
                 "check_out": row[4],
                 "guests": row[5],
                 "status": row[6],
-                "total_amount": str(
-                    row[7]
-                ),
+                "total_amount": str(row[7]),
             }
             for row in rows
         ],
@@ -845,10 +812,17 @@ def list_bookings(
 # 4.3 BOOKING DETAIL
 # =========================================================
 
-
 @router.get(
     "/bookings/{booking_id}",
     response_model=BookingOut,
+    tags=["Bookings"],
+    summary="Get Booking Details",
+    description="Returns detailed information for a single booking.",
+    responses={
+        200: {"model": BookingOut, "description": "Booking details"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        404: {"model": ErrorEnvelope, "description": "Booking not found"},
+    },
 )
 def get_booking(
     booking_id: int,
@@ -867,27 +841,22 @@ def get_booking(
             upper(b.stay),
             b.guests_count,
             b.status,
-            COALESCE(
-                SUM(p.amount),
-                0
-            )
+            COALESCE(SUM(p.amount), 0) AS total_paid,
+            r.property_id
         FROM bookings b
-
         JOIN rooms r
             ON r.room_id = b.room_id
-
         LEFT JOIN payments p
             ON p.booking_id = b.booking_id
-
         WHERE b.booking_id = %s
-
         GROUP BY
             b.booking_id,
             b.guest_id,
             b.room_id,
             b.stay,
             b.guests_count,
-            b.status;
+            b.status,
+            r.property_id;
         """,
         (booking_id,),
     )
@@ -896,7 +865,6 @@ def get_booking(
 
     if row is None:
         cur.close()
-
         raise HTTPException(
             status_code=404,
             detail="Booking not found",
@@ -905,12 +873,9 @@ def get_booking(
     visible = True
 
     # -----------------------------------------------------
-    # GUEST
+    # GUEST SCOPE
     # -----------------------------------------------------
-
     if account["role"] == "guest":
-
-        # account_id is linked to guest_id through accounts.
         cur.execute(
             """
             SELECT guest_id
@@ -921,21 +886,18 @@ def get_booking(
         )
 
         account_row = cur.fetchone()
-
         visible = (
             account_row is not None
             and account_row[0] == row[1]
         )
 
     # -----------------------------------------------------
-    # STAFF / MANAGER
+    # STAFF / MANAGER SCOPE
     # -----------------------------------------------------
-
     elif account["role"] in {
         "staff",
         "manager",
     }:
-
         cur.execute(
             """
             SELECT property_id
@@ -946,29 +908,13 @@ def get_booking(
         )
 
         assigned = cur.fetchone()
-
-        cur.execute(
-            """
-            SELECT property_id
-            FROM rooms
-            WHERE room_id = %s;
-            """,
-            (row[2],),
-        )
-
-        room_property = cur.fetchone()
-
         visible = (
             assigned is not None
-            and room_property is not None
-            and assigned[0] == room_property[0]
+            and assigned[0] == row[8]
         )
 
     cur.close()
 
-    # Important:
-    # Do not reveal whether another guest's
-    # booking exists.
     if not visible:
         raise HTTPException(
             status_code=404,
@@ -991,10 +937,16 @@ def get_booking(
 # 4.5 ME
 # =========================================================
 
-
 @router.get(
     "/me",
     response_model=MeOut,
+    tags=["Authentication"],
+    summary="Get Current User Profile",
+    description="Returns account and profile information for the authenticated caller.",
+    responses={
+        200: {"model": MeOut, "description": "Profile details"},
+        401: {"model": ErrorEnvelope, "description": "Invalid or expired token"},
+    },
 )
 def me(
     account=Depends(current_account),
@@ -1002,57 +954,39 @@ def me(
 ):
     cur = conn.cursor()
 
+    # Single joined query to eliminate N+1 lookup
     cur.execute(
         """
         SELECT
-            account_id,
-            email,
-            role,
-            property_id,
-            guest_id
-        FROM accounts
-        WHERE account_id = %s
-          AND is_active = TRUE;
+            a.account_id,
+            a.email,
+            a.role,
+            a.property_id,
+            g.full_name
+        FROM accounts a
+        LEFT JOIN guests g
+            ON g.guest_id = a.guest_id
+        WHERE a.account_id = %s
+          AND a.is_active = TRUE;
         """,
         (account["account_id"],),
     )
 
     row = cur.fetchone()
+    cur.close()
 
     if row is None:
-        cur.close()
-
         raise HTTPException(
             status_code=401,
             detail="Invalid or expired token",
         )
 
-    full_name = None
-
-    if row[4] is not None:
-
-        cur.execute(
-            """
-            SELECT full_name
-            FROM guests
-            WHERE guest_id = %s;
-            """,
-            (row[4],),
-        )
-
-        guest = cur.fetchone()
-
-        if guest is not None:
-            full_name = guest[0]
-
-    cur.close()
-
     return {
         "account_id": row[0],
         "email": row[1],
-        "full_name": full_name,
         "role": row[2],
         "property_id": row[3],
+        "full_name": row[4],
     }
 
 
@@ -1060,14 +994,12 @@ def me(
 # REPORT HELPER
 # =========================================================
 
-
 def report_scope(
     cur,
     account,
     property_id,
 ):
     if account["role"] == "manager":
-
         cur.execute(
             """
             SELECT property_id
@@ -1078,27 +1010,15 @@ def report_scope(
         )
 
         row = cur.fetchone()
+        assigned = row[0] if row else None
 
-        assigned = (
-            row[0]
-            if row
-            else None
-        )
-
-        if (
-            property_id is not None
-            and property_id != assigned
-        ):
+        if property_id is not None and property_id != assigned:
             raise HTTPException(
                 status_code=403,
                 detail="Forbidden",
             )
 
-        return (
-            assigned
-            if property_id is None
-            else property_id
-        )
+        return assigned if property_id is None else property_id
 
     return property_id
 
@@ -1107,10 +1027,18 @@ def report_scope(
 # 4.4 OCCUPANCY
 # =========================================================
 
-
 @router.get(
     "/reports/occupancy",
     response_model=ReportPage,
+    tags=["Reports"],
+    summary="Occupancy Report",
+    description="Calculates monthly occupancy rates. Manager (own property) and Owner (all properties).",
+    responses={
+        200: {"model": ReportPage, "description": "Monthly occupancy rates"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Forbidden for other property"},
+        422: {"model": ErrorEnvelope, "description": "Invalid date range"},
+    },
 )
 def report_occupancy(
     property_id: int | None = None,
@@ -1139,169 +1067,76 @@ def report_occupancy(
     cur.execute(
         """
         WITH months AS (
-
             SELECT generate_series(
-                date_trunc(
-                    'month',
-                    %s::date
-                )::date,
-
-                date_trunc(
-                    'month',
-                    (%s::date - 1)
-                )::date,
-
+                date_trunc('month', %s::date)::date,
+                date_trunc('month', (%s::date - 1))::date,
                 interval '1 month'
-
             )::date AS month
         ),
-
         properties_scope AS (
-
             SELECT property_id
             FROM properties
-            WHERE (
-                %s IS NULL
-                OR property_id = %s
-            )
+            WHERE (%s IS NULL OR property_id = %s)
         ),
-
         available AS (
-
             SELECT
                 p.property_id,
                 m.month,
-
-                COUNT(r.room_id)
-                *
-                EXTRACT(
+                COUNT(r.room_id) * EXTRACT(
                     DAY FROM (
-                        LEAST(
-                            m.month
-                            + INTERVAL '1 month',
-                            %s::date
-                        )
-                        -
-                        GREATEST(
-                            m.month,
-                            %s::date
-                        )
+                        LEAST(m.month + INTERVAL '1 month', %s::date)
+                        - GREATEST(m.month, %s::date)
                     )
                 ) AS available_nights
-
             FROM properties_scope p
-
             CROSS JOIN months m
-
-            JOIN rooms r
-                ON r.property_id = p.property_id
-
-            GROUP BY
-                p.property_id,
-                m.month
+            JOIN rooms r ON r.property_id = p.property_id
+            GROUP BY p.property_id, m.month
         ),
-
         occupied AS (
-
             SELECT
                 r.property_id,
                 m.month,
-
                 SUM(
                     GREATEST(
                         0,
-
                         EXTRACT(
                             DAY FROM (
-                                LEAST(
-                                    upper(b.stay),
-                                    m.month
-                                    + INTERVAL '1 month',
-                                    %s::date
-                                )
-                                -
-                                GREATEST(
-                                    lower(b.stay),
-                                    m.month,
-                                    %s::date
-                                )
+                                LEAST(upper(b.stay), m.month + INTERVAL '1 month', %s::date)
+                                - GREATEST(lower(b.stay), m.month, %s::date)
                             )
                         )
                     )
                 ) AS occupied_nights
-
             FROM bookings b
-
-            JOIN rooms r
-                ON r.room_id = b.room_id
-
+            JOIN rooms r ON r.room_id = b.room_id
             CROSS JOIN months m
-
-            WHERE b.status IN (
-                'confirmed',
-                'checked_in',
-                'checked_out'
-            )
-
-            AND (
-                %s IS NULL
-                OR r.property_id = %s
-            )
-
-            AND b.stay && daterange(
-                %s,
-                %s,
-                '[)'
-            )
-
-            GROUP BY
-                r.property_id,
-                m.month
+            WHERE b.status IN ('confirmed', 'checked_in', 'checked_out')
+              AND (%s IS NULL OR r.property_id = %s)
+              AND b.stay && daterange(%s, %s, '[)')
+            GROUP BY r.property_id, m.month
         )
-
         SELECT
             a.property_id,
             a.month,
-
-            COALESCE(
-                o.occupied_nights,
-                0
-            )
-            /
-            NULLIF(
-                a.available_nights,
-                0
-            )
-            * 100
-
+            COALESCE(o.occupied_nights, 0) / NULLIF(a.available_nights, 0) * 100
         FROM available a
-
         LEFT JOIN occupied o
             ON o.property_id = a.property_id
            AND o.month = a.month
-
-        ORDER BY
-            a.property_id,
-            a.month;
+        ORDER BY a.property_id, a.month;
         """,
         (
-            from_,
-            to,
-            property_id,
-            property_id,
-            to,
-            from_,
-            to,
-            from_,
-            property_id,
-            property_id,
-            from_,
-            to,
+            from_, to,
+            property_id, property_id,
+            to, from_,
+            to, from_,
+            property_id, property_id,
+            from_, to,
         ),
     )
 
     rows = cur.fetchall()
-
     cur.close()
 
     return {
@@ -1309,10 +1144,7 @@ def report_occupancy(
             {
                 "property_id": row[0],
                 "month": row[1],
-                "value": str(
-                    row[2]
-                    or Decimal("0")
-                ),
+                "value": str(row[2] or Decimal("0")),
             }
             for row in rows
         ]
@@ -1323,10 +1155,18 @@ def report_occupancy(
 # 4.4 ADR
 # =========================================================
 
-
 @router.get(
     "/reports/adr",
     response_model=ReportPage,
+    tags=["Reports"],
+    summary="ADR Report",
+    description="Calculates Average Daily Rate per property per month.",
+    responses={
+        200: {"model": ReportPage, "description": "Monthly ADR values"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Forbidden for other property"},
+        422: {"model": ErrorEnvelope, "description": "Invalid date range"},
+    },
 )
 def report_adr(
     property_id: int | None = None,
@@ -1355,194 +1195,75 @@ def report_adr(
     cur.execute(
         """
         WITH months AS (
-
             SELECT generate_series(
-                date_trunc(
-                    'month',
-                    %s::date
-                )::date,
-
-                date_trunc(
-                    'month',
-                    (%s::date - 1)
-                )::date,
-
+                date_trunc('month', %s::date)::date,
+                date_trunc('month', (%s::date - 1))::date,
                 interval '1 month'
             )::date AS month
         ),
-
         revenue AS (
-
             SELECT
                 r.property_id,
                 m.month,
-
                 SUM(
                     pay.amount
-                    *
-                    GREATEST(
+                    * GREATEST(
                         0,
-
-                        EXTRACT(
-                            DAY FROM (
-                                LEAST(
-                                    upper(b.stay),
-                                    m.month
-                                    + INTERVAL '1 month',
-                                    %s::date
-                                )
-                                -
-                                GREATEST(
-                                    lower(b.stay),
-                                    m.month,
-                                    %s::date
-                                )
-                            )
-                        )
+                        (LEAST(upper(b.stay), (m.month + INTERVAL '1 month')::date, %s::date)
+                         - GREATEST(lower(b.stay), m.month, %s::date))
                     )
-                    /
-                    NULLIF(
-                        EXTRACT(
-                            DAY FROM b.stay
-                        ),
-                        0
-                    )
+                    / NULLIF(upper(b.stay) - lower(b.stay), 0)
                 ) AS revenue
-
             FROM bookings b
-
-            JOIN rooms r
-                ON r.room_id = b.room_id
-
-            JOIN payments pay
-                ON pay.booking_id = b.booking_id
-
+            JOIN rooms r ON r.room_id = b.room_id
+            JOIN payments pay ON pay.booking_id = b.booking_id
             CROSS JOIN months m
-
-            WHERE b.status IN (
-                'confirmed',
-                'checked_in',
-                'checked_out'
-            )
-
-            AND (
-                %s IS NULL
-                OR r.property_id = %s
-            )
-
-            AND b.stay && daterange(
-                %s,
-                %s,
-                '[)'
-            )
-
-            GROUP BY
-                r.property_id,
-                m.month
+            WHERE b.status IN ('confirmed', 'checked_in', 'checked_out')
+              AND (%s IS NULL OR r.property_id = %s)
+              AND b.stay && daterange(%s, %s, '[)')
+            GROUP BY r.property_id, m.month
         ),
-
         sold AS (
-
             SELECT
                 r.property_id,
                 m.month,
-
                 SUM(
                     GREATEST(
                         0,
-
-                        EXTRACT(
-                            DAY FROM (
-                                LEAST(
-                                    upper(b.stay),
-                                    m.month
-                                    + INTERVAL '1 month',
-                                    %s::date
-                                )
-                                -
-                                GREATEST(
-                                    lower(b.stay),
-                                    m.month,
-                                    %s::date
-                                )
-                            )
-                        )
+                        (LEAST(upper(b.stay), (m.month + INTERVAL '1 month')::date, %s::date)
+                         - GREATEST(lower(b.stay), m.month, %s::date))
                     )
                 ) AS nights
-
             FROM bookings b
-
-            JOIN rooms r
-                ON r.room_id = b.room_id
-
+            JOIN rooms r ON r.room_id = b.room_id
             CROSS JOIN months m
-
-            WHERE b.status IN (
-                'confirmed',
-                'checked_in',
-                'checked_out'
-            )
-
-            AND (
-                %s IS NULL
-                OR r.property_id = %s
-            )
-
-            AND b.stay && daterange(
-                %s,
-                %s,
-                '[)'
-            )
-
-            GROUP BY
-                r.property_id,
-                m.month
+            WHERE b.status IN ('confirmed', 'checked_in', 'checked_out')
+              AND (%s IS NULL OR r.property_id = %s)
+              AND b.stay && daterange(%s, %s, '[)')
+            GROUP BY r.property_id, m.month
         )
-
         SELECT
             revenue.property_id,
             revenue.month,
-
-            revenue.revenue
-            /
-            NULLIF(
-                sold.nights,
-                0
-            )
-
+            revenue.revenue / NULLIF(sold.nights, 0)
         FROM revenue
-
         JOIN sold
-            ON sold.property_id =
-                revenue.property_id
-
-           AND sold.month =
-                revenue.month
-
-        ORDER BY
-            revenue.property_id,
-            revenue.month;
+            ON sold.property_id = revenue.property_id
+           AND sold.month = revenue.month
+        ORDER BY revenue.property_id, revenue.month;
         """,
         (
-            from_,
-            to,
-            to,
-            from_,
-            property_id,
-            property_id,
-            from_,
-            to,
-            to,
-            from_,
-            property_id,
-            property_id,
-            from_,
-            to,
+            from_, to,
+            to, from_,
+            property_id, property_id,
+            from_, to,
+            to, from_,
+            property_id, property_id,
+            from_, to,
         ),
     )
 
     rows = cur.fetchall()
-
     cur.close()
 
     return {
@@ -1550,10 +1271,7 @@ def report_adr(
             {
                 "property_id": row[0],
                 "month": row[1],
-                "value": str(
-                    row[2]
-                    or Decimal("0")
-                ),
+                "value": str(row[2] or Decimal("0")),
             }
             for row in rows
         ]
@@ -1564,10 +1282,18 @@ def report_adr(
 # 4.4 REVPAR
 # =========================================================
 
-
 @router.get(
     "/reports/revpar",
     response_model=ReportPage,
+    tags=["Reports"],
+    summary="RevPAR Report",
+    description="Calculates Revenue per Available Room per property per month.",
+    responses={
+        200: {"model": ReportPage, "description": "Monthly RevPAR values"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Forbidden for other property"},
+        422: {"model": ErrorEnvelope, "description": "Invalid date range"},
+    },
 )
 def report_revpar(
     property_id: int | None = None,
@@ -1596,177 +1322,70 @@ def report_revpar(
     cur.execute(
         """
         WITH months AS (
-
             SELECT generate_series(
-                date_trunc(
-                    'month',
-                    %s::date
-                )::date,
-
-                date_trunc(
-                    'month',
-                    (%s::date - 1)
-                )::date,
-
+                date_trunc('month', %s::date)::date,
+                date_trunc('month', (%s::date - 1))::date,
                 interval '1 month'
             )::date AS month
         ),
-
         revenue AS (
-
             SELECT
                 r.property_id,
                 m.month,
-
                 SUM(
                     pay.amount
-                    *
-                    GREATEST(
+                    * GREATEST(
                         0,
-
-                        EXTRACT(
-                            DAY FROM (
-                                LEAST(
-                                    upper(b.stay),
-                                    m.month
-                                    + INTERVAL '1 month',
-                                    %s::date
-                                )
-                                -
-                                GREATEST(
-                                    lower(b.stay),
-                                    m.month,
-                                    %s::date
-                                )
-                            )
-                        )
+                        (LEAST(upper(b.stay), (m.month + INTERVAL '1 month')::date, %s::date)
+                         - GREATEST(lower(b.stay), m.month, %s::date))
                     )
-                    /
-                    NULLIF(
-                        EXTRACT(
-                            DAY FROM b.stay
-                        ),
-                        0
-                    )
+                    / NULLIF(upper(b.stay) - lower(b.stay), 0)
                 ) AS revenue
-
             FROM bookings b
-
-            JOIN rooms r
-                ON r.room_id = b.room_id
-
-            JOIN payments pay
-                ON pay.booking_id = b.booking_id
-
+            JOIN rooms r ON r.room_id = b.room_id
+            JOIN payments pay ON pay.booking_id = b.booking_id
             CROSS JOIN months m
-
-            WHERE b.status IN (
-                'confirmed',
-                'checked_in',
-                'checked_out'
-            )
-
-            AND (
-                %s IS NULL
-                OR r.property_id = %s
-            )
-
-            AND b.stay && daterange(
-                %s,
-                %s,
-                '[)'
-            )
-
-            GROUP BY
-                r.property_id,
-                m.month
+            WHERE b.status IN ('confirmed', 'checked_in', 'checked_out')
+              AND (%s IS NULL OR r.property_id = %s)
+              AND b.stay && daterange(%s, %s, '[)')
+            GROUP BY r.property_id, m.month
         ),
-
         rooms_available AS (
-
             SELECT
                 p.property_id,
                 m.month,
-
-                COUNT(r.room_id)
-                *
-                EXTRACT(
-                    DAY FROM (
-                        LEAST(
-                            m.month
-                            + INTERVAL '1 month',
-                            %s::date
-                        )
-                        -
-                        GREATEST(
-                            m.month,
-                            %s::date
-                        )
-                    )
+                COUNT(r.room_id) * (
+                    LEAST((m.month + INTERVAL '1 month')::date, %s::date)
+                    - GREATEST(m.month, %s::date)
                 ) AS available_nights
-
             FROM properties p
-
-            JOIN rooms r
-                ON r.property_id = p.property_id
-
+            JOIN rooms r ON r.property_id = p.property_id
             CROSS JOIN months m
-
-            WHERE (
-                %s IS NULL
-                OR p.property_id = %s
-            )
-
-            GROUP BY
-                p.property_id,
-                m.month
+            WHERE (%s IS NULL OR p.property_id = %s)
+            GROUP BY p.property_id, m.month
         )
-
         SELECT
             ra.property_id,
             ra.month,
-
-            COALESCE(
-                rv.revenue,
-                0
-            )
-            /
-            NULLIF(
-                ra.available_nights,
-                0
-            )
-
+            COALESCE(rv.revenue, 0) / NULLIF(ra.available_nights, 0)
         FROM rooms_available ra
-
         LEFT JOIN revenue rv
-            ON rv.property_id =
-                ra.property_id
-
-           AND rv.month =
-                ra.month
-
-        ORDER BY
-            ra.property_id,
-            ra.month;
+            ON rv.property_id = ra.property_id
+           AND rv.month = ra.month
+        ORDER BY ra.property_id, ra.month;
         """,
         (
-            from_,
-            to,
-            to,
-            from_,
-            property_id,
-            property_id,
-            from_,
-            to,
-            to,
-            from_,
-            property_id,
-            property_id,
+            from_, to,
+            to, from_,
+            property_id, property_id,
+            from_, to,
+            to, from_,
+            property_id, property_id,
         ),
     )
 
-    rows = cur.fetchall()
 
+    rows = cur.fetchall()
     cur.close()
 
     return {
@@ -1774,10 +1393,7 @@ def report_revpar(
             {
                 "property_id": row[0],
                 "month": row[1],
-                "value": str(
-                    row[2]
-                    or Decimal("0")
-                ),
+                "value": str(row[2] or Decimal("0")),
             }
             for row in rows
         ]
@@ -1788,10 +1404,18 @@ def report_revpar(
 # GUESTS
 # =========================================================
 
-
 @router.get(
     "/guests",
     response_model=GuestPage,
+    tags=["Guests"],
+    summary="List Guests",
+    description="Returns a paginated list of registered hotel guests. Staff/Manager/Owner only.",
+    responses={
+        200: {"model": GuestPage, "description": "List of guests"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Forbidden"},
+        422: {"model": ErrorEnvelope, "description": "Validation error"},
+    },
 )
 def list_guests(
     email: str | None = None,
@@ -1829,7 +1453,6 @@ def list_guests(
     total = cur.fetchone()[0]
 
     if email:
-
         cur.execute(
             """
             SELECT
@@ -1848,9 +1471,7 @@ def list_guests(
                 offset,
             ),
         )
-
     else:
-
         cur.execute(
             """
             SELECT
@@ -1869,7 +1490,6 @@ def list_guests(
         )
 
     rows = cur.fetchall()
-
     cur.close()
 
     return {
@@ -1892,6 +1512,16 @@ def list_guests(
 @router.get(
     "/guests/{guest_id}",
     response_model=GuestOut,
+    tags=["Guests"],
+    summary="Get Guest",
+    description="Returns details of a specific guest by ID. Staff/Manager/Owner only.",
+    responses={
+        200: {"model": GuestOut, "description": "Guest details"},
+        401: {"model": ErrorEnvelope, "description": "Authentication required"},
+        403: {"model": ErrorEnvelope, "description": "Forbidden"},
+        404: {"model": ErrorEnvelope, "description": "Guest not found"},
+        422: {"model": ErrorEnvelope, "description": "Validation error"},
+    },
 )
 def get_guest(
     guest_id: int,
@@ -1913,7 +1543,6 @@ def get_guest(
     )
 
     row = cur.fetchone()
-
     cur.close()
 
     if row is None:

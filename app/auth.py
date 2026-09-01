@@ -1,3 +1,4 @@
+import hashlib
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -63,17 +64,20 @@ def create_refresh_token() -> str:
 
 
 def hash_refresh_token(token: str) -> str:
-    return hash_password(token)
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def verify_refresh_token(
     token: str,
     token_hash: str,
 ) -> bool:
-    return verify_password(
-        token,
-        token_hash,
-    )
+    if token_hash.startswith("$2b$") or token_hash.startswith("$2a$"):
+        return verify_password(
+            token,
+            token_hash,
+        )
+    computed = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return secrets.compare_digest(computed, token_hash)
 
 
 def decode_access_token(token: str) -> dict:
