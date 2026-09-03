@@ -10,6 +10,7 @@ import {
   Users,
 } from 'lucide-react';
 import { getProperty, getRooms, getAvailability, parseApiError } from '../../api';
+import { useAuth } from '../../context/AuthContext';
 import type { PropertyOut, RoomOut, AvailabilityRoom } from '../../types';
 import {
   PageHeader,
@@ -30,6 +31,7 @@ import {
 export const PropertyDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const propertyId = Number(id);
+  const { isGuest } = useAuth();
 
   const [property, setProperty] = useState<PropertyOut | null>(null);
   const [rooms, setRooms] = useState<RoomOut[]>([]);
@@ -56,12 +58,18 @@ export const PropertyDetailPage: React.FC = () => {
       setIsLoading(true);
       setError(null);
       try {
-        const [propRes, roomsRes] = await Promise.all([
-          getProperty(propertyId),
-          getRooms(propertyId, 100, 0),
-        ]);
+        const propRes = await getProperty(propertyId);
         setProperty(propRes);
-        setRooms(roomsRes.items);
+
+        // Room inventory catalog is only available to Staff/Manager/Owner
+        if (!isGuest) {
+          try {
+            const roomsRes = await getRooms(propertyId, 100, 0);
+            setRooms(roomsRes.items);
+          } catch {
+            setRooms([]);
+          }
+        }
       } catch (err) {
         setError(parseApiError(err));
       } finally {
@@ -70,7 +78,7 @@ export const PropertyDetailPage: React.FC = () => {
     };
 
     fetchData();
-  }, [propertyId]);
+  }, [propertyId, isGuest]);
 
   const handleCheckInChange = (newCheckIn: string) => {
     setCheckIn(newCheckIn);
@@ -279,34 +287,36 @@ export const PropertyDetailPage: React.FC = () => {
         )}
       </div>
 
-      {/* Property Room Inventory */}
-      <div className="space-y-4">
-        <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2">
-          <Building2 className="w-5 h-5 text-brand-400" />
-          <span>Room Inventory Catalog ({rooms.length} Rooms)</span>
-        </h2>
+      {/* Property Room Inventory (Staff/Manager/Owner only) */}
+      {!isGuest && rooms.length > 0 && (
+        <div className="space-y-4">
+          <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2">
+            <Building2 className="w-5 h-5 text-brand-400" />
+            <span>Room Inventory Catalog ({rooms.length} Rooms)</span>
+          </h2>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-          {rooms.map((room) => (
-            <div
-              key={room.room_id}
-              className="rounded-2xl bg-slate-900/70 border border-slate-800 p-5 space-y-3"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold uppercase tracking-wider text-brand-400">
-                  {room.room_type}
-                </span>
-                <span className="text-xs text-slate-400 font-mono">#{room.room_id}</span>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            {rooms.map((room) => (
+              <div
+                key={room.room_id}
+                className="rounded-2xl bg-slate-900/70 border border-slate-800 p-5 space-y-3"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold uppercase tracking-wider text-brand-400">
+                    {room.room_type}
+                  </span>
+                  <span className="text-xs text-slate-400 font-mono">#{room.room_id}</span>
+                </div>
+                <h3 className="text-lg font-bold text-slate-100">Room {room.room_number}</h3>
+                <div className="text-xs text-slate-400 flex items-center gap-1.5 pt-2 border-t border-slate-800">
+                  <Users className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Accommodates up to {room.max_occupancy} guests</span>
+                </div>
               </div>
-              <h3 className="text-lg font-bold text-slate-100">Room {room.room_number}</h3>
-              <div className="text-xs text-slate-400 flex items-center gap-1.5 pt-2 border-t border-slate-800">
-                <Users className="w-3.5 h-3.5 text-slate-500" />
-                <span>Accommodates up to {room.max_occupancy} guests</span>
-              </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 };
