@@ -36,24 +36,23 @@ kaveri-api/
 │   ├── main.py             # FastAPI app, exception handlers, rate limiter, write routes
 │   ├── models.py           # Pydantic schemas (extra="forbid") & ErrorEnvelope
 │   └── read_api.py         # Read routes, property availability, scoping & analytics
+├── frontend/               # Full React + TypeScript + Tailwind PMS web app
+│   ├── src/                # Components, pages, hooks, contexts & API clients
+│   ├── package.json        # Frontend dependencies
+│   ├── vite.config.ts      # Vite dev server with backend API proxy
+│   └── README.md           # Frontend setup & features guide
 ├── tests/
-│   └── test_api_stages_5_and_8.py  # Comprehensive 24-test pytest suite (100% pass)
+│   └── test_api_stages_5_and_8.py  # Comprehensive 24-test pytest suite
 ├── scripts/
-│   ├── benchmark_stage_9.py        # EXPLAIN ANALYZE index proof & pool saturation test
-│   ├── concurrency_test_8_10.py    # Multi-threaded simultaneous race condition test
-│   ├── generate_openapi_yaml.py    # Generates reconciled 05_openapi_final.yaml
-│   ├── generate_postman_collection.py # Generates 06_postman_collection.json & environments
-│   ├── run_auth_matrix.py          # Executes 4-environment authorization matrix
-│   └── run_newman.js               # Programmatic Newman test suite runner
-├── 01_constraints.md       # Stage 1: Business rules and database constraints
-├── 02_auth_design.md       # Stage 2: Authentication & authorization architecture
-├── 03_authorization_matrix.md # Stage 3: Normative authorization matrix specification
-├── 04_reconciliation.md    # Stage 4: Reconciliation between DB constraints & API models
-├── 05_openapi_final.yaml   # Stage 5/6: Reconciled authoritative OpenAPI 3.1.0 specification
-├── 06_spec_drift.md        # Stage 6: OpenAPI specification drift analysis
-├── 07_authorization_matrix.md # Stage 7: Execution results across 4 environments
-├── 08_break_it.md          # Stage 8: Security attacks and positive test executions
-├── 09_performance.md       # Stage 9: Performance benchmarks & EXPLAIN ANALYZE proofs
+│   ├── migrate_to_supabase.py      # Database schema creation & data migration script
+│   ├── seed_rate_plans_2026_2027.sql # Rate plans SQL seed data
+│   ├── verify_fastapi_with_supabase.py # Backend & Supabase integration check
+│   ├── verify_supabase_migration.py    # Supabase migration verification
+│   ├── verify_db_config.py         # Database configuration check
+│   └── verify_rbac_roles.py        # RBAC role verification utility
+├── FRONTEND_README.md      # Frontend architecture & user guide
+├── FRONTEND_SPEC.md        # Detailed frontend UI & API specifications
+├── FRONTEND_PLAN.md        # Frontend implementation plan
 └── README.md
 ```
 
@@ -63,8 +62,8 @@ kaveri-api/
 
 ### Prerequisites
 - Python 3.11+
-- PostgreSQL 14+ with database named `kaveri`
-- Node.js 18+ (for Postman/Newman test runner)
+- Node.js 18+
+- PostgreSQL 14+ / Supabase database
 
 ### Environment Setup
 Create `.env` in project root:
@@ -77,44 +76,33 @@ DATABASE_PASSWORD=your_password_here
 JWT_SECRET=your_jwt_secret_key_here_minimum_32_characters
 ```
 
-### Running the API
+### Running the Backend API
 ```bash
-# Start FastAPI application with Uvicorn
+# In the project root
 .\venv\Scripts\uvicorn.exe app.main:app --port 8000 --host 127.0.0.1
 ```
-API Documentation (Swagger UI): `http://127.0.0.1:8000/docs`
-OpenAPI JSON Schema: `http://127.0.0.1:8000/openapi.json`
+- API Documentation (Swagger UI): `http://127.0.0.1:8000/docs`
+- OpenAPI JSON Schema: `http://127.0.0.1:8000/openapi.json`
+
+### Running the Frontend
+```bash
+cd frontend
+npm install
+npm run dev
+```
+- Web Application: `http://127.0.0.1:5173/`
 
 ---
 
 ## 4. Running Automated Tests & Verification
 
-### 1. Pytest Test Suite & Coverage
+### Pytest Test Suite
 ```bash
-.\venv\Scripts\pytest.exe -v --cov=app --cov-report=term-missing tests/
+.\venv\Scripts\pytest.exe -v tests/
 ```
-*Result: 24 passed in ~15s (100% pass rate, 73% total coverage).*
 
-### 2. Multi-threaded Concurrency Test (Attack 8.10)
+### Database Verification
 ```bash
-.\venv\Scripts\python.exe scripts/concurrency_test_8_10.py
+.\venv\Scripts\python.exe scripts/verify_fastapi_with_supabase.py
 ```
-*Result: Exactly 1 request receives 201 Created; conflicting simultaneous request receives 409 Conflict.*
 
-### 3. EXPLAIN ANALYZE & Connection Pool Saturation
-```bash
-.\venv\Scripts\python.exe scripts/benchmark_stage_9.py
-```
-*Result: Proves GiST index usage on `stay` daterange and handles 11th pool connection gracefully.*
-
-### 4. Postman / Newman Collection Runner
-```bash
-node scripts/run_newman.js
-```
-*Result: 21 requests executed, 33 assertions passed (0 failures).*
-
-### 5. Authorization Matrix Verification
-```bash
-.\venv\Scripts\python.exe scripts/run_auth_matrix.py
-```
-*Result: Verifies full 4-role permission grid across all 15 core endpoints.*
