@@ -31,7 +31,13 @@ import {
 export const PropertyDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const propertyId = Number(id);
-  const { isGuest } = useAuth();
+  const { user } = useAuth();
+
+  const isAuthorizedStaffForProperty =
+    user &&
+    (user.role === 'owner' ||
+      ((user.role === 'staff' || user.role === 'manager') &&
+        user.property_id === propertyId));
 
   const [property, setProperty] = useState<PropertyOut | null>(null);
   const [rooms, setRooms] = useState<RoomOut[]>([]);
@@ -61,14 +67,16 @@ export const PropertyDetailPage: React.FC = () => {
         const propRes = await getProperty(propertyId);
         setProperty(propRes);
 
-        // Room inventory catalog is only available to Staff/Manager/Owner
-        if (!isGuest) {
+        // Internal room catalog is scoped only to assigned staff and owners
+        if (isAuthorizedStaffForProperty) {
           try {
             const roomsRes = await getRooms(propertyId, 100, 0);
             setRooms(roomsRes.items);
           } catch {
             setRooms([]);
           }
+        } else {
+          setRooms([]);
         }
       } catch (err) {
         setError(parseApiError(err));
@@ -78,7 +86,7 @@ export const PropertyDetailPage: React.FC = () => {
     };
 
     fetchData();
-  }, [propertyId, isGuest]);
+  }, [propertyId, isAuthorizedStaffForProperty]);
 
   const handleCheckInChange = (newCheckIn: string) => {
     setCheckIn(newCheckIn);
@@ -288,7 +296,7 @@ export const PropertyDetailPage: React.FC = () => {
       </div>
 
       {/* Property Room Inventory (Staff/Manager/Owner only) */}
-      {!isGuest && rooms.length > 0 && (
+      {isAuthorizedStaffForProperty && rooms.length > 0 && (
         <div className="space-y-4">
           <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2">
             <Building2 className="w-5 h-5 text-brand-400" />
