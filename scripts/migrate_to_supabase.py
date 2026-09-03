@@ -13,14 +13,12 @@ LOCAL_PW = os.getenv('DATABASE_PASSWORD', '98Teja66#')
 LOCAL_PORT = 5432
 
 # Destination connection
-SUPABASE_HOST = 'db.ujdvgekijdpzelsebald.supabase.co'
+SUPABASE_HOST = os.getenv('SUPABASE_HOST', 'aws-0-ap-northeast-1.pooler.supabase.com')
 SUPABASE_DB = 'postgres'
-SUPABASE_USER = 'postgres'
-SUPABASE_PW = os.environ.get('SUPABASE_PASSWORD')
-SUPABASE_PORT = 5432
+SUPABASE_USER = os.getenv('SUPABASE_USER', 'postgres.ujdvgekijdpzelsebald')
+SUPABASE_PW = os.environ.get('SUPABASE_PASSWORD', 'KaveriStays2026!')
+SUPABASE_PORT = int(os.getenv('SUPABASE_PORT', '6543'))
 
-if not SUPABASE_PW:
-    raise ValueError('SUPABASE_PASSWORD environment variable is required.')
 
 print('=== CONNECTING TO DATABASES ===')
 local_conn = psycopg2.connect(
