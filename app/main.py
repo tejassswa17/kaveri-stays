@@ -50,6 +50,7 @@ app = FastAPI(
 )
 
 ALLOWED_ORIGINS = [
+    "https://kaveri-stays-1.onrender.com",
     "https://kaveri-stays-2.onrender.com",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -67,10 +68,12 @@ if cors_origins_env:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"https://.*\.vercel\.app|https://.*\.onrender\.com|http://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 
 # =========================================================
